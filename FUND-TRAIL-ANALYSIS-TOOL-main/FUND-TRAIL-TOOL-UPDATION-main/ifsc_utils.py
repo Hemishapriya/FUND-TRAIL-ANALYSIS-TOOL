@@ -1,7 +1,7 @@
 import os
 import sys
 import pandas as pd
-import pickle
+import json
 from functools import lru_cache
 
 # Attempt to find IFSC_CODES.xlsx in a few likely locations
@@ -19,17 +19,17 @@ else:
 
 @lru_cache(maxsize=1)
 def load_ifsc_table():
-    # 1. Try to load from a pickle file first (fastest)
+    # 1. Try to load from a json file first (fastest)
     for p in POSSIBLE_PATHS:
-        pkl_path = os.path.splitext(p)[0] + '.pkl'
-        if os.path.exists(pkl_path):
+        json_path = os.path.splitext(p)[0] + '.json'
+        if os.path.exists(json_path):
             try:
-                with open(pkl_path, 'rb') as f:
-                    return pickle.load(f)
+                with open(json_path, 'r') as f:
+                    return json.load(f)
             except Exception:
-                pass  # Fallback to Excel if pickle is corrupt/incompatible
+                pass  # Fallback to Excel if json is corrupt/incompatible
 
-    # 2. If no pickle, load Excel (slow) and save as pickle
+    # 2. If no json, load Excel (slow) and save as json
     for p in POSSIBLE_PATHS:
         if os.path.exists(p):
             try:
@@ -76,13 +76,13 @@ def load_ifsc_table():
                     
                     mapping[key] = rowdict
 
-                # Save to pickle for next time
+                # Save to json for next time
                 try:
-                    pkl_out = os.path.splitext(p)[0] + '.pkl'
-                    with open(pkl_out, 'wb') as f:
-                        pickle.dump(mapping, f)
+                    json_out = os.path.splitext(p)[0] + '.json'
+                    with open(json_out, 'w') as f:
+                        json.dump(mapping, f)
                 except Exception as e:
-                    print(f"Warning: Could not save IFSC cache to {pkl_out}: {e}")
+                    print(f"Warning: Could not save IFSC cache to {json_out}: {e}")
 
                 return mapping
             except Exception as e:

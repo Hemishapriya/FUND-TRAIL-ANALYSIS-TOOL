@@ -3,7 +3,13 @@ from app import app, db, Transaction
 import os
 
 def test_victim_letter_generation():
-    app.config['WTF_CSRF_ENABLED'] = False
+    import os
+    if os.environ.get('FLASK_ENV') == 'testing':
+        app.config['TESTING'] = True
+        app.config['WTF_CSRF_ENABLED'] = False
+    else:
+        app.config['TESTING'] = False
+        app.config['WTF_CSRF_ENABLED'] = True
     with app.app_context():
         # Setup test client
         client = app.test_client()

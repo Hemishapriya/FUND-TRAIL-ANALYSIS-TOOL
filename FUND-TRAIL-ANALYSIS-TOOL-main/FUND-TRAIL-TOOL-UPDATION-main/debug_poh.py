@@ -35,7 +35,7 @@ with app.app_context():
         
         print("Sending POST request to localhost...")
         try:
-            res = requests.post(url, json=payload)
+            res = requests.post(url, json=payload, timeout=(3.05, 27))
             print(f"Status Code: {res.status_code}")
             print(f"Response Text: {res.text[:200]}")
         except Exception as e:

@@ -2,8 +2,11 @@ from flask import Flask, render_template, request, redirect, session, url_for, f
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
 import secrets
 import time
+
+load_dotenv()
 import hmac
 from urllib.parse import urlparse, urljoin
 from flask_sqlalchemy import SQLAlchemy
@@ -218,6 +221,10 @@ def validate_password(password):
         return False, "Password must contain special character"
     return True, "Valid"
 
+# Note: The User model in models.py has its own validate_password function that raises ValueError.
+# This one is kept if needed for other checks, but we should align them.
+# For now, we rely on User.set_password to enforce complexity.
+
 ALLOWED_IFSC_DOMAIN = 'ifsc.razorpay.com'
 MAX_WORKERS = 10
 IFSC_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ifsc_state_cache.json')
@@ -303,7 +310,9 @@ login_manager.login_view = 'login'  # redirect to this route if not logged in
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY') or 'dev-secret-key'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
+if not app.config['SECRET_KEY']:
+    raise RuntimeError("SECRET_KEY environment variable must be set")
 # Fallback to SQLite when DATABASE_URL is not provided (e.g., in packaged EXE)
 db_url = os.environ.get('DATABASE_URL')
 if not db_url:
@@ -463,29 +472,40 @@ def ensure_user_columns():
                     )
                     if not result.fetchone():
                         try:
+                            if col not in required_columns:
+                                raise ValueError(f"Invalid column name: {col}")
                             conn.execute(text(f'ALTER TABLE `user` ADD COLUMN `{col}` {ddl}'))
                             logger.info(f"Added missing user column: {col}")
                         except Exception as exc:
                             logger.warning(f"Skipping user column {col}; encountered error: {exc}")
+
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
+if not ADMIN_PASSWORD:
+    # In a real production environment, you should raise a RuntimeError.
+    # For now, we'll log a warning and use a fallback for development if not provided.
+    logger.warning("ADMIN_PASSWORD environment variable not set. Using default for development.")
+    ADMIN_PASSWORD = 'Admin@123456'
+
+OFFICER_PASSWORD = os.environ.get('OFFICER_PASSWORD', 'Officer@123456')
 
 def add_dummy_users():
     """Create initial users if they don't exist."""
     # Check if users already exist to avoid duplicates or primary key errors
     if not User.query.filter_by(username='admin').first():
         admin = User(username='admin', role='Admin')
-        admin.set_password('admin123')
+        admin.set_password(ADMIN_PASSWORD)
         db.session.add(admin)
         logger.info("Admin user created.")
 
     if not User.query.filter_by(username='officer').first():
         officer = User(username='officer', role='Investigative Officer')
-        officer.set_password('Officer123')
+        officer.set_password(OFFICER_PASSWORD)
         db.session.add(officer)
         logger.info("Officer user created.")
 
     if not User.query.filter_by(username='viewer').first():
         viewer = User(username='viewer', role='Viewer')
-        viewer.set_password('viewer123')
+        viewer.set_password('Viewer@123456')
         db.session.add(viewer)
         logger.info("Viewer user created.")
 
@@ -498,10 +518,6 @@ with app.app_context():
     ensure_usage_log_table()
 
 
-USERS = {
-    'admin': {'password': 'admin123', 'role': 'Admin'},
-    'officer': {'password': 'Officer123', 'role': 'Investigative Officer'}
-}
 
 VIEW_ONLY_ROLES = {'Viewer'}
 
@@ -509,11 +525,16 @@ VIEW_ONLY_ROLES = {'Viewer'}
 def home():
     return redirect('/login')
 
+ALLOWED_HOSTS = {'localhost', '127.0.0.1', '0.0.0.0'}
+
 def is_safe_url(target):
-    """Validate redirect URL is safe (same domain)"""
-    ref_url = urlparse(request.host_url)
-    test_url = urlparse(urljoin(request.host_url, target))
-    return test_url.scheme in ('http', 'https') and ref_url.netloc == test_url.netloc
+    if not target:
+        return False
+    # Only allow relative URLs starting with /
+    if target.startswith('/') and not target.startswith('//'):
+        return True
+    parsed = urlparse(target)
+    return parsed.netloc in ALLOWED_HOSTS and parsed.scheme in ('http', 'https')
 
 @app.route('/login', methods=['GET', 'POST'])
 @limiter.limit("5 per minute")
@@ -530,7 +551,7 @@ def login():
             if not user:
                 # Create default viewer user
                 user = User(username='viewer', role='Viewer', name='Public Viewer')
-                user.set_password('viewer')  # Dummy password
+                user.set_password('Viewer@123456')  # Dummy password
                 db.session.add(user)
                 db.session.commit()
             
@@ -2787,12 +2808,12 @@ def edit_officer(officer_id):
 
     password = request.json.get('password')
     if password:
-        valid, message = validate_password(password)
-        if not valid:
-            return jsonify({'error': message}), 400
-        officer.set_password(password)
-        db.session.commit()
-        return jsonify({'message': 'Password updated successfully'})
+        try:
+            officer.set_password(password)
+            db.session.commit()
+            return jsonify({'message': 'Password updated successfully'})
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
     
     return jsonify({'error': 'No password provided'}), 400
 
@@ -3033,11 +3054,15 @@ def add_officer():
             username=username,
             role='Investigative Officer'
         )
-        new_officer.set_password(password)
-        db.session.add(new_officer)
-        db.session.commit()
-        flash('Verification Officer added successfully.')
-        return redirect(url_for('view_officers'))
+        try:
+            new_officer.set_password(password)
+            db.session.add(new_officer)
+            db.session.commit()
+            flash('Verification Officer added successfully.')
+            return redirect(url_for('view_officers'))
+        except ValueError as e:
+            flash(str(e))
+            return redirect(url_for('add_officer'))
 
     return render_template('add_officer.html')
 
@@ -3069,9 +3094,13 @@ def submit_officer():
         rank=rank,
         email=email
     )
-    new_officer.set_password(password)  # ✅ Use method, not direct assignment
-    db.session.add(new_officer)
-    db.session.commit()
+    try:
+        new_officer.set_password(password)  # ✅ Use method, not direct assignment
+        db.session.add(new_officer)
+        db.session.commit()
+    except ValueError as e:
+        flash(str(e), "danger")
+        return redirect('/add_officer')
 
     flash("Verification Officer added successfully!", "success")
     return redirect('/admin_dashboard')
@@ -3084,16 +3113,12 @@ with app.app_context():
 
     # ✅ Indentation correctly inside app_context
     if User.query.count() == 0:
-        admin = User(
-            username='admin',
-            password_hash=generate_password_hash('admin123'),
-            role='Admin'
-        )
-        officer = User(
-            username='officer',
-            password_hash=generate_password_hash('officer123'),
-            role='Investigative Officer'
-        )
+        admin = User(username='admin', role='Admin')
+        admin.set_password('Admin@123456')
+        
+        officer = User(username='officer', role='Investigative Officer')
+        officer.set_password('Officer@123456')
+        
         db.session.add(admin)
         db.session.add(officer)
         db.session.commit()

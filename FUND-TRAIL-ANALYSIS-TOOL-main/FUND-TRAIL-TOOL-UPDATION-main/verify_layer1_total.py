@@ -3,7 +3,13 @@ import unittest
 
 class TestLayer1Total(unittest.TestCase):
     def setUp(self):
-        app.config['TESTING'] = True
+        import os
+        if os.environ.get('FLASK_ENV') == 'testing':
+            app.config['TESTING'] = True
+            app.config['WTF_CSRF_ENABLED'] = False
+        else:
+            app.config['TESTING'] = False
+            app.config['WTF_CSRF_ENABLED'] = True
         app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
         self.app = app.test_client()
         with app.app_context():

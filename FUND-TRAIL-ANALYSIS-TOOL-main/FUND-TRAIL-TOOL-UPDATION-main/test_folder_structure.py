@@ -3,7 +3,13 @@ import os
 import shutil
 
 def test_suspect_letter_folder():
-    app.config['WTF_CSRF_ENABLED'] = False
+    import os
+    if os.environ.get('FLASK_ENV') == 'testing':
+        app.config['TESTING'] = True
+        app.config['WTF_CSRF_ENABLED'] = False
+    else:
+        app.config['TESTING'] = False
+        app.config['WTF_CSRF_ENABLED'] = True
     client = app.test_client()
     
     ack_no = "TEST_FOLDER_CHECK"

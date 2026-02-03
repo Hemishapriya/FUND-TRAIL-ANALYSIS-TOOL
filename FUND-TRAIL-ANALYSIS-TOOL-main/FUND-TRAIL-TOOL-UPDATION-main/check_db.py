@@ -1,8 +1,17 @@
+import os
+from dotenv import load_dotenv
 import pymysql
 from sqlalchemy import create_engine, text
 
+load_dotenv()
+
 # Database connection
-engine = create_engine('mysql+pymysql://root:root%40123@localhost/fundtrail_db')
+DB_USER = os.environ.get('DB_USER')
+DB_PASS = os.environ.get('DB_PASS')
+DB_HOST = os.environ.get('DB_HOST', 'localhost')
+DB_NAME = os.environ.get('DB_NAME', 'fundtrail_db')
+
+engine = create_engine(f'mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}')
 
 with engine.connect() as conn:
     # Check all ACK numbers in transactions
@@ -15,7 +24,10 @@ with engine.connect() as conn:
     files = result.fetchall()
     for file in files:
         file_id, filename = file
-        result_ack = conn.execute(text(f'SELECT DISTINCT ack_no FROM transaction WHERE upload_id = {file_id} AND ack_no IS NOT NULL AND ack_no != ""'))
+        result_ack = conn.execute(
+            text('SELECT DISTINCT ack_no FROM transaction WHERE upload_id = :upload_id AND ack_no IS NOT NULL AND ack_no != ""'),
+            {"upload_id": file_id}
+        )
         acks = [row[0] for row in result_ack]
         print(f'File: {filename}, ID: {file_id}, ACKs: {acks}')    
     # Check TXN_ID field status

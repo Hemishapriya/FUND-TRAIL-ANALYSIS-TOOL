@@ -4,7 +4,13 @@ import os
 from datetime import datetime
 
 def verify_generation():
-    app.config['WTF_CSRF_ENABLED'] = False
+    import os
+    if os.environ.get('FLASK_ENV') == 'testing':
+        app.config['TESTING'] = True
+        app.config['WTF_CSRF_ENABLED'] = False
+    else:
+        app.config['TESTING'] = False
+        app.config['WTF_CSRF_ENABLED'] = True
     
     # Ensure we have a dummy transaction with a layer and date
     with app.app_context():

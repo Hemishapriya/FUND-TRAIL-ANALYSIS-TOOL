@@ -102,7 +102,7 @@ async function openHoldPopup() {
   if (!holdModalOverlay) return;
   holdModalOverlay.style.display = 'flex';
   if (holdStatusText) holdStatusText.textContent = 'Loading...';
-  if (holdTableBody) holdTableBody.innerHTML = '';
+  if (holdTableBody) holdTableBody.textContent = '';
   holdFilters = {};
   holdSort = { column: null, direction: null };
   currentHoldFilterColumn = null;
@@ -137,7 +137,7 @@ function renderHoldTable(rows) {
   holdRowsData = rows || [];
 
   if (!holdRowsData || holdRowsData.length === 0) {
-    holdTableBody.innerHTML = '';
+    holdTableBody.textContent = '';
     if (holdStatusText) holdStatusText.textContent = 'No put-on-hold transactions found for this complaint.';
     return;
   }
@@ -256,25 +256,59 @@ function applyHoldFilters() {
 
   const sortedRows = sortHoldRows(filtered);
 
-  holdTableBody.innerHTML = sortedRows.map((row, idx) => `
-    <tr>
-      <td><input type="checkbox" class="hold-row-select" data-account-number="${escapeHtml(row.account_number || '')}"></td>
-      <td>${idx + 1}</td>
-      <td>
-        <a href="#" class="hold-account-link" data-account-number="${escapeHtml(row.account_number || '')}">
-          ${escapeHtml(row.account_number || 'N/A')}
-        </a>
-      </td>
-      <td>${escapeHtml(row.bank_name || 'N/A')}</td>
-      <td>${escapeHtml(row.branch_name || 'N/A')}</td>
-      <td>${escapeHtml(row.ifsc_code || 'N/A')}</td>
-      <td>${escapeHtml(formatHoldValue(row, 'amount'))}</td>
-      <td>${escapeHtml(formatHoldValue(row, 'court_order_date'))}</td>
-      <td>${escapeHtml(formatHoldValue(row, 'refund_status'))}</td>
-      <td>${escapeHtml(formatHoldValue(row, 'refund_amount'))}</td>
-      <td>${escapeHtml(row.layer || 'N/A')}</td>
-    </tr>
-  `).join('');
+  holdTableBody.textContent = '';
+  
+  const fragment = document.createDocumentFragment();
+
+  sortedRows.forEach((row, idx) => {
+    const tr = document.createElement('tr');
+
+    // Checkbox
+    const tdCheck = document.createElement('td');
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'hold-row-select';
+    checkbox.setAttribute('data-account-number', row.account_number || '');
+    tdCheck.appendChild(checkbox);
+    tr.appendChild(tdCheck);
+
+    // Index
+    const tdIndex = document.createElement('td');
+    tdIndex.textContent = idx + 1;
+    tr.appendChild(tdIndex);
+
+    // Account Number Link
+    const tdAccount = document.createElement('td');
+    const link = document.createElement('a');
+    link.href = '#';
+    link.className = 'hold-account-link';
+    link.setAttribute('data-account-number', row.account_number || '');
+    link.textContent = row.account_number || 'N/A';
+    tdAccount.appendChild(link);
+    tr.appendChild(tdAccount);
+
+    // Other Columns
+    const columns = [
+      row.bank_name || 'N/A',
+      row.branch_name || 'N/A',
+      row.ifsc_code || 'N/A',
+      formatHoldValue(row, 'amount'),
+      formatHoldValue(row, 'court_order_date'),
+      formatHoldValue(row, 'refund_status'),
+      formatHoldValue(row, 'refund_amount'),
+      row.layer || 'N/A'
+    ];
+
+    columns.forEach(text => {
+      const td = document.createElement('td');
+      td.textContent = text;
+      tr.appendChild(td);
+    });
+
+    fragment.appendChild(tr);
+  });
+
+  holdTableBody.appendChild(fragment);
 
   holdTableBody.querySelectorAll('.hold-account-link').forEach(link => {
     link.addEventListener('click', (e) => {
@@ -307,35 +341,95 @@ function showHoldFilterMenu(button) {
     ? new Set([...holdFilters[column]].map(v => normalizeFilterValue(column, v)))
     : new Set(allValues);
 
-  const bodyHtml = allValues.map(val => `
-    <label>
-      <input type="checkbox" value="${escapeHtml(val)}" ${selected.has(val) ? 'checked' : ''}>
-      <span>${escapeHtml(val)}</span>
-    </label>
-  `).join('');
+  holdFilterMenu.textContent = '';
+  
+  // Header
+  const headerDiv = document.createElement('div');
+  headerDiv.className = 'menu-header';
+  const headerSpan = document.createElement('span');
+  headerSpan.textContent = `Filter by ${button.parentElement?.textContent?.trim() || column}`;
+  headerDiv.appendChild(headerSpan);
+  const closeBtn = document.createElement('button');
+  closeBtn.setAttribute('aria-label', 'Close filter');
+  closeBtn.style.cssText = 'border:none;background:none;cursor:pointer;font-size:16px;';
+  closeBtn.textContent = '×';
+  headerDiv.appendChild(closeBtn);
+  holdFilterMenu.appendChild(headerDiv);
 
-  holdFilterMenu.innerHTML = `
-    <div class="menu-header">
-      <span>Filter by ${escapeHtml(button.parentElement?.textContent?.trim() || column)}</span>
-      <button aria-label="Close filter" style="border:none;background:none;cursor:pointer;font-size:16px;">×</button>
-    </div>
-    <div class="menu-search" style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb;">
-      <input type="text" placeholder="Search..." style="width: 100%; padding: 6px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 13px;">
-    </div>
-    <div class="menu-sort">
-      <button type="button" data-sort="asc">Ascending ↑</button>
-      <button type="button" data-sort="desc">Descending ↓</button>
-    </div>
-    <div class="menu-actions">
-      <button type="button" data-action="select-all">Select All</button>
-      <button type="button" data-action="clear-all">Clear</button>
-    </div>
-    <div class="menu-body">${bodyHtml}</div>
-    <div class="menu-footer">
-      <button class="clear-btn" type="button" data-action="reset">Reset</button>
-      <button class="apply-btn" type="button" data-action="apply">Apply</button>
-    </div>
-  `;
+  // Search
+  const searchDiv = document.createElement('div');
+  searchDiv.className = 'menu-search';
+  searchDiv.style.cssText = 'padding: 8px 12px; border-bottom: 1px solid #e5e7eb;';
+  const searchInput = document.createElement('input');
+  searchInput.type = 'text';
+  searchInput.placeholder = 'Search...';
+  searchInput.style.cssText = 'width: 100%; padding: 6px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 13px;';
+  searchDiv.appendChild(searchInput);
+  holdFilterMenu.appendChild(searchDiv);
+
+  // Sort
+  const sortDiv = document.createElement('div');
+  sortDiv.className = 'menu-sort';
+  const ascBtn = document.createElement('button');
+  ascBtn.type = 'button';
+  ascBtn.setAttribute('data-sort', 'asc');
+  ascBtn.textContent = 'Ascending ↑';
+  sortDiv.appendChild(ascBtn);
+  const descBtn = document.createElement('button');
+  descBtn.type = 'button';
+  descBtn.setAttribute('data-sort', 'desc');
+  descBtn.textContent = 'Descending ↓';
+  sortDiv.appendChild(descBtn);
+  holdFilterMenu.appendChild(sortDiv);
+
+  // Actions
+  const actionsDiv = document.createElement('div');
+  actionsDiv.className = 'menu-actions';
+  const selectAllBtn = document.createElement('button');
+  selectAllBtn.type = 'button';
+  selectAllBtn.setAttribute('data-action', 'select-all');
+  selectAllBtn.textContent = 'Select All';
+  actionsDiv.appendChild(selectAllBtn);
+  const clearAllBtn = document.createElement('button');
+  clearAllBtn.type = 'button';
+  clearAllBtn.setAttribute('data-action', 'clear-all');
+  clearAllBtn.textContent = 'Clear';
+  actionsDiv.appendChild(clearAllBtn);
+  holdFilterMenu.appendChild(actionsDiv);
+
+  // Body
+  const bodyDiv = document.createElement('div');
+  bodyDiv.className = 'menu-body';
+  allValues.forEach(val => {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = val;
+    if (selected.has(val)) cb.checked = true;
+    label.appendChild(cb);
+    const span = document.createElement('span');
+    span.textContent = val;
+    label.appendChild(span);
+    bodyDiv.appendChild(label);
+  });
+  holdFilterMenu.appendChild(bodyDiv);
+
+  // Footer
+  const footerDiv = document.createElement('div');
+  footerDiv.className = 'menu-footer';
+  const resetBtn = document.createElement('button');
+  resetBtn.className = 'clear-btn';
+  resetBtn.type = 'button';
+  resetBtn.setAttribute('data-action', 'reset');
+  resetBtn.textContent = 'Reset';
+  footerDiv.appendChild(resetBtn);
+  const applyBtn = document.createElement('button');
+  applyBtn.className = 'apply-btn';
+  applyBtn.type = 'button';
+  applyBtn.setAttribute('data-action', 'apply');
+  applyBtn.textContent = 'Apply';
+  footerDiv.appendChild(applyBtn);
+  holdFilterMenu.appendChild(footerDiv);
 
   const rect = button.getBoundingClientRect();
   holdFilterMenu.style.top = `${rect.bottom + window.scrollY + 4}px`;
@@ -344,18 +438,16 @@ function showHoldFilterMenu(button) {
   holdFilterMenu.setAttribute('aria-hidden', 'false');
 
   // Search functionality
-  const searchInput = holdFilterMenu.querySelector('.menu-search input');
-  if (searchInput) {
-    searchInput.focus();
-    searchInput.onclick = (e) => e.stopPropagation();
-    searchInput.oninput = (e) => {
-      const term = e.target.value.toLowerCase();
-      holdFilterMenu.querySelectorAll('.menu-body label').forEach(label => {
-        const text = label.textContent.toLowerCase();
-        label.style.display = text.includes(term) ? '' : 'none';
-      });
-    };
-  }
+  // searchInput is already defined above
+  searchInput.focus();
+  searchInput.onclick = (e) => e.stopPropagation();
+  searchInput.oninput = (e) => {
+    const term = e.target.value.toLowerCase();
+    holdFilterMenu.querySelectorAll('.menu-body label').forEach(label => {
+      const text = label.textContent.toLowerCase();
+      label.style.display = text.includes(term) ? '' : 'none';
+    });
+  };
 
   const closeMenu = () => {
     holdFilterMenu.style.display = 'none';
@@ -505,7 +597,11 @@ fetch(`/graph_data/${ackNo}`)
       const chartEl = document.getElementById('chart');
       if (chartEl) {
         const message = data.error || 'No graph data found for this Acknowledgement No.';
-        chartEl.innerHTML = `<div style="text-align:center; padding:50px; font-size:18px; color:#666;">${escapeHtml(message)}</div>`;
+        chartEl.textContent = '';
+        const msgDiv = document.createElement('div');
+        msgDiv.style.cssText = 'text-align:center; padding:50px; font-size:18px; color:#666;';
+        msgDiv.textContent = message;
+        chartEl.appendChild(msgDiv);
       }
       return;
     }
@@ -525,7 +621,11 @@ fetch(`/graph_data/${ackNo}`)
       console.log('No valid graph data found - cleanedData:', cleanedData);
       const chartEl = document.getElementById('chart');
       if (chartEl) {
-        chartEl.innerHTML = '<div style="text-align:center; padding:50px; font-size:18px; color:#666;">No valid graph data found for this Acknowledgement No.</div>';
+        chartEl.textContent = '';
+        const msgDiv = document.createElement('div');
+        msgDiv.style.cssText = 'text-align:center; padding:50px; font-size:18px; color:#666;';
+        msgDiv.textContent = 'No valid graph data found for this Acknowledgement No.';
+        chartEl.appendChild(msgDiv);
       }
       return;
     }
@@ -534,7 +634,11 @@ fetch(`/graph_data/${ackNo}`)
     if (!root || !root.children || root.children.length === 0) {
       const chartEl = document.getElementById('chart');
       if (chartEl) {
-        chartEl.innerHTML = '<div style="text-align:center; padding:50px; font-size:18px; color:#666;">No valid graph data found for this Acknowledgement No.</div>';
+        chartEl.textContent = '';
+        const msgDiv = document.createElement('div');
+        msgDiv.style.cssText = 'text-align:center; padding:50px; font-size:18px; color:#666;';
+        msgDiv.textContent = 'No valid graph data found for this Acknowledgement No.';
+        chartEl.appendChild(msgDiv);
       }
       return;
     }
@@ -554,7 +658,11 @@ fetch(`/graph_data/${ackNo}`)
     if (!root.children || root.children.length === 0) {
       const chartEl = document.getElementById('chart');
       if (chartEl) {
-        chartEl.innerHTML = '<div style="text-align:center; padding:50px; font-size:18px; color:#666;">No valid graph data found for this Acknowledgement No.</div>';
+        chartEl.textContent = '';
+        const msgDiv = document.createElement('div');
+        msgDiv.style.cssText = 'text-align:center; padding:50px; font-size:18px; color:#666;';
+        msgDiv.textContent = 'No valid graph data found for this Acknowledgement No.';
+        chartEl.appendChild(msgDiv);
       }
       return;
     }
@@ -584,7 +692,11 @@ fetch(`/graph_data/${ackNo}`)
       } else if (error.message.includes('404')) {
         errorMessage = 'Graph data not found. Please check the Acknowledgement No.';
       }
-      chartEl.innerHTML = `<div style="text-align:center; padding:50px; font-size:18px; color:#666;">${escapeHtml(errorMessage)}</div>`;
+      const msgDiv = document.createElement('div');
+      msgDiv.style.cssText = 'text-align:center; padding:50px; font-size:18px; color:#666;';
+      msgDiv.textContent = errorMessage;
+      chartEl.textContent = '';
+      chartEl.appendChild(msgDiv);
     }
   });
 

@@ -2,8 +2,23 @@ from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timezone
 from flask_login import UserMixin
+import re
 
 db = SQLAlchemy()
+
+def validate_password(password):
+    """Enforce password complexity"""
+    if len(password) < 12:
+        raise ValueError("Password must be at least 12 characters")
+    if not re.search(r'[A-Z]', password):
+        raise ValueError("Password must contain uppercase letter")
+    if not re.search(r'[a-z]', password):
+        raise ValueError("Password must contain lowercase letter")
+    if not re.search(r'[0-9]', password):
+        raise ValueError("Password must contain number")
+    if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+        raise ValueError("Password must contain special character")
+    return True
 
 class Transaction(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -102,6 +117,7 @@ class User(db.Model, UserMixin):
     account_locked_until = db.Column(db.DateTime, nullable=True)
 
     def set_password(self, password):
+        validate_password(password)
         self.password_hash = generate_password_hash(password)
 
     def check_password(self, password):

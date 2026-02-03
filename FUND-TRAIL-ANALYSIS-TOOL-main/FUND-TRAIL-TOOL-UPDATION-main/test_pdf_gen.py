@@ -5,8 +5,13 @@ import io
 
 class TestPDFGen(unittest.TestCase):
     def setUp(self):
-        app.config['TESTING'] = True
-        app.config['WTF_CSRF_ENABLED'] = False  # Disable CSRF for testing
+        import os
+        if os.environ.get('FLASK_ENV') == 'testing':
+            app.config['TESTING'] = True
+            app.config['WTF_CSRF_ENABLED'] = False
+        else:
+            app.config['TESTING'] = False
+            app.config['WTF_CSRF_ENABLED'] = True
         self.app = app.test_client()
         
         # We assume the DB is already set up and has the admin user
