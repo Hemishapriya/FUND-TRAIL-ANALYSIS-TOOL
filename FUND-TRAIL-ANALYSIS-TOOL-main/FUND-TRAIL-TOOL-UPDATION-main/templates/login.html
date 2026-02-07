@@ -120,24 +120,7 @@
       {% endif %}
 
       <script nonce="{{ csp_nonce }}">
-        // Toggle credential fields for Viewer (read-only)
-        const roleSelect = document.getElementById('roleSelect');
-        const userInput = document.getElementById('usernameInput');
-        const passInput = document.getElementById('passwordInput');
-
-        function toggleCreds() {
-          const isViewer = roleSelect.value === 'Viewer';
-          userInput.required = !isViewer;
-          passInput.required = !isViewer;
-          userInput.disabled = isViewer;
-          passInput.disabled = isViewer;
-          if (isViewer) {
-            userInput.value = '';
-            passInput.value = '';
-          }
-        }
-
-        roleSelect.addEventListener('change', toggleCreds);
+        // Validations or other scripts if needed
       </script>
     </div>
   </div>

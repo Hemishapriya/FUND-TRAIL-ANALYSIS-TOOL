@@ -115,6 +115,7 @@ class User(db.Model, UserMixin):
     manual_upload_count = db.Column(db.Integer, nullable=True)
     failed_login_attempts = db.Column(db.Integer, default=0)
     account_locked_until = db.Column(db.DateTime, nullable=True)
+    must_change_password = db.Column(db.Boolean, default=False)
 
     def set_password(self, password):
         validate_password(password)

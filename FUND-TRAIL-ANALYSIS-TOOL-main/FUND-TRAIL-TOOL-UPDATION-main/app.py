@@ -2,9 +2,11 @@ from flask import Flask, render_template, request, redirect, session, url_for, f
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.utils import secure_filename
+from functools import wraps
 from dotenv import load_dotenv
 import secrets
 import time
+import string
 
 load_dotenv()
 import hmac
@@ -132,6 +134,10 @@ def set_security_headers(response):
     response.headers['Content-Security-Policy'] = csp_policy
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['Permissions-Policy'] = 'geolocation=(), microphone=(), camera=()'
+    
+    # Remove Server header to prevent version disclosure (FT-09)
+    response.headers.pop('Server', None)
+    
     return response
 
 csrf = CSRFProtect(app)
@@ -195,6 +201,32 @@ def get_state(ifsc):
         ifsc_cache[ifsc] = state
         return state
     # Fallback to local IFSC_CODES.xlsx lookup
+
+def check_case_access(ack_no):
+    """
+    Verifies if the current user has access to the case identified by ack_no.
+    Aborts with 403 if unauthorized.
+    """
+    if current_user.role == 'Admin':
+        return
+
+    ack_no = str(ack_no).strip()
+    complaint = Complaint.query.filter_by(ack_no=ack_no).first()
+    
+    if complaint:
+        if complaint.assigned_to == current_user.id or complaint.uploaded_by == current_user.id:
+            return
+    else:
+        # Check legacy UploadedFile if Complaint record missing
+        # We need to find if any transaction with this ack_no links to an UploadedFile uploaded by this user
+        # This is expensive, so maybe just strict check? 
+        # But let's try to be helpful. 
+        # Actually, let's stick to the user's example which implies strict Complaint check or Admin.
+        pass
+
+    logger.warning(f"Unauthorized access attempt to resource {ack_no} by {current_user.username}")
+    abort(403)
+
     try:
         from ifsc_utils import get_state as excel_get_state
         state = excel_get_state(ifsc)
@@ -310,9 +342,19 @@ login_manager.login_view = 'login'  # redirect to this route if not logged in
 @login_manager.user_loader
 def load_user(user_id):
     return User.query.get(int(user_id))
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
-if not app.config['SECRET_KEY']:
-    raise RuntimeError("SECRET_KEY environment variable must be set")
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated or current_user.role != 'Admin':
+            abort(403)
+        return f(*args, **kwargs)
+    return decorated_function
+
+SECRET_KEY = os.environ.get('SECRET_KEY')
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY environment variable not set!")
+app.config['SECRET_KEY'] = SECRET_KEY
 # Fallback to SQLite when DATABASE_URL is not provided (e.g., in packaged EXE)
 db_url = os.environ.get('DATABASE_URL')
 if not db_url:
@@ -329,7 +371,7 @@ app.config['SQLALCHEMY_BINDS'] = {
 
 # Secure session cookie configuration
 # NOTE: Set SESSION_COOKIE_SECURE to True in production with HTTPS
-app.config['SESSION_COOKIE_SECURE'] = False 
+app.config['SESSION_COOKIE_SECURE'] = True # Requires HTTPS
 app.config['SESSION_COOKIE_HTTPONLY'] = True # No JavaScript access
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax' # CSRF protection
 # Removed __Host- prefix as it requires Secure=True (HTTPS)
@@ -544,29 +586,6 @@ def login():
         # Use .get() to avoid KeyError when viewer fields are disabled
         role = request.form.get('role', '').strip()
 
-        # Special handling for Viewer role - Auto login
-        if role == 'Viewer':
-            # Check for existing viewer user or create one
-            user = User.query.filter_by(role='Viewer').first()
-            if not user:
-                # Create default viewer user
-                user = User(username='viewer', role='Viewer', name='Public Viewer')
-                user.set_password('Viewer@123456')  # Dummy password
-                db.session.add(user)
-                db.session.commit()
-            
-            # Log in as viewer
-            login_user(user)
-            session['username'] = user.username
-            session['role'] = 'Viewer'
-            log_usage('login')
-            
-            # Perform dummy hash operation to maintain consistent timing even for viewer
-            dummy_hash = generate_password_hash('dummy_password')
-            check_password_hash(dummy_hash, 'dummy')
-            
-            return redirect('/index')
-            
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
 
@@ -1304,7 +1323,11 @@ def complaints():
     return render_template('complaint.html', complaints=dummy_complaints)
 
 @app.route('/graph_data/<ack_no>')
+@login_required
 def graph_data(ack_no):
+    # Authorization check
+    check_case_access(ack_no)
+
     try:
         ack_no = ack_no.strip()
         logger.info(f"Fetching graph data for ACK: {ack_no}")
@@ -1723,8 +1746,10 @@ def available_ack_nos():
 
 
 @app.route('/atm_data/<ack_no>')
+@login_required
 def atm_data(ack_no):
     """Return rows from the ATM-related sheet for the uploaded Excel associated with this ack_no."""
+    check_case_access(ack_no)
     try:
         # Find the most recent uploaded file for this ack_no
         up_row = db.session.query(UploadedFile).join(Transaction, Transaction.upload_id == UploadedFile.id).filter(Transaction.ack_no == ack_no).order_by(UploadedFile.upload_time.desc()).first()
@@ -1888,7 +1913,9 @@ def atm_data(ack_no):
         return jsonify({'atm': [], 'error': str(e)})
 
 @app.route('/statewise_summary/<ack_no>')
+@login_required
 def statewise_summary(ack_no):
+    check_case_access(ack_no)
     try:
         # Check if we have any transactions with known states
         known_states_count = db.session.query(Transaction).filter(
@@ -1999,8 +2026,10 @@ def statewise_summary(ack_no):
         return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/put_on_hold_transactions/<ack_no>')
+@login_required
 def put_on_hold_transactions(ack_no):
     """Return all put-on-hold transactions for a complaint."""
+    check_case_access(ack_no)
     try:
         from ifsc_utils import get_ifsc_info
 
@@ -2047,7 +2076,9 @@ def put_on_hold_transactions(ack_no):
         return jsonify({'error': 'Internal server error'}), 500
 
 @app.route('/state_transactions/<ack_no>/<state>')
+@login_required
 def state_transactions(ack_no, state):
+    check_case_access(ack_no)
     page = int(request.args.get('page', 1))
     per_page = int(request.args.get('per_page', 50))
     offset = (page - 1) * per_page
@@ -2845,7 +2876,8 @@ def delete_officer():
 
 
 @app.route('/view_analytics')
-# @login_required
+@login_required
+@admin_required
 def view_analytics():
     try:
         log_usage('view_analytics')
@@ -3035,7 +3067,8 @@ def view_complaint(complaint_id):
     return render_template('complaint.html', complaint=complaint)
 
 @app.route('/admin/add_officer', methods=['GET', 'POST'])
-# @login_required
+@login_required
+@admin_required
 def add_officer():
     if session.get('role') != 'Admin':  # FIXED: 'Admin' not 'admin'
         flash('Access Denied!')
@@ -3113,16 +3146,43 @@ with app.app_context():
 
     # ✅ Indentation correctly inside app_context
     if User.query.count() == 0:
+        # Generate random initial passwords that meet complexity requirements
+        def generate_secure_password(length=16):
+            alphabet = string.ascii_letters + string.digits + '!@#$%^&*(),.?":{}|<>'
+            while True:
+                password = ''.join(secrets.choice(alphabet) for i in range(length))
+                if (any(c.islower() for c in password)
+                        and any(c.isupper() for c in password)
+                        and any(c.isdigit() for c in password)
+                        and any(c in '!@#$%^&*(),.?":{}|<>' for c in password)):
+                    return password
+
+        admin_password = generate_secure_password()
+        officer_password = generate_secure_password()
+        viewer_password = generate_secure_password()
+
         admin = User(username='admin', role='Admin')
-        admin.set_password('Admin@123456')
+        admin.set_password(admin_password)
+        admin.must_change_password = True
         
         officer = User(username='officer', role='Investigative Officer')
-        officer.set_password('Officer@123456')
+        officer.set_password(officer_password)
+        officer.must_change_password = True
+
+        viewer = User(username='viewer', role='Viewer')
+        viewer.set_password(viewer_password)
+        viewer.must_change_password = True
         
         db.session.add(admin)
         db.session.add(officer)
+        db.session.add(viewer)
         db.session.commit()
-        logger.info("Dummy users added to the database")
+        
+        logger.info("Users initialized with secure random passwords.")
+        print(f"[SETUP] Initial admin password: {admin_password}")
+        print(f"[SETUP] Initial officer password: {officer_password}")
+        print(f"[SETUP] Initial viewer password: {viewer_password}")
+        print("[SETUP] Change these passwords immediately!")
 
 
 # Configure custom error handlers
@@ -3133,7 +3193,8 @@ def not_found(error):
 @app.errorhandler(500)
 def internal_error(error):
     logger.error(f"Internal error: {str(error)}", exc_info=True)
-    return jsonify({'error': 'An internal error occurred'}), 500
+    # Include error details for debugging
+    return jsonify({'error': f'An internal error occurred: {str(error)}'}), 500
 
 @app.errorhandler(403)
 def forbidden(error):

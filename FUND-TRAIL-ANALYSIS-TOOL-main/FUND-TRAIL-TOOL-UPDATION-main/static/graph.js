@@ -689,8 +689,12 @@ fetch(`/graph_data/${ackNo}`)
       let errorMessage = 'Error loading graph data. Please try again later.';
       if (error.message.includes('500')) {
         errorMessage = 'Server error occurred while processing graph data. Please contact support.';
+      } else if (error.message.includes('403')) {
+        errorMessage = 'Access Denied: You are not authorized to view this case.';
       } else if (error.message.includes('404')) {
         errorMessage = 'Graph data not found. Please check the Acknowledgement No.';
+      } else {
+        errorMessage += ' ' + error.message;
       }
       const msgDiv = document.createElement('div');
       msgDiv.style.cssText = 'text-align:center; padding:50px; font-size:18px; color:#666;';
