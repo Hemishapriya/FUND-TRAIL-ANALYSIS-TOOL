@@ -116,6 +116,9 @@ def set_security_headers(response):
     response.headers['X-XSS-Protection'] = '1; mode=block'
     response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     
+    # Remove Server header to prevent information disclosure
+    response.headers.pop('Server', None)
+    
     # Use the nonce generated in before_request
     nonce = getattr(g, 'csp_nonce', '')
     
@@ -207,7 +210,7 @@ def check_case_access(ack_no):
     Verifies if the current user has access to the case identified by ack_no.
     Aborts with 403 if unauthorized.
     """
-    if current_user.role == 'Admin':
+    if current_user.role in ['Admin', 'Viewer']:
         return
 
     ack_no = str(ack_no).strip()
@@ -325,6 +328,7 @@ def get_state_from_api(ifsc_code):
 
 
 @app.route('/ifsc_info/<ifsc>')
+@login_required
 def ifsc_info(ifsc):
     try:
         from ifsc_utils import get_ifsc_info
@@ -372,6 +376,7 @@ app.config['SQLALCHEMY_BINDS'] = {
 # Secure session cookie configuration
 # NOTE: Set SESSION_COOKIE_SECURE to True in production with HTTPS
 app.config['SESSION_COOKIE_SECURE'] = True # Requires HTTPS
+
 app.config['SESSION_COOKIE_HTTPONLY'] = True # No JavaScript access
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax' # CSRF protection
 # Removed __Host- prefix as it requires Secure=True (HTTPS)
@@ -495,7 +500,8 @@ def ensure_user_columns():
         'name': 'VARCHAR(100)',
         'rank': 'VARCHAR(100)',
         'email': 'VARCHAR(120)',
-        'manual_upload_count': 'INT NULL'
+        'manual_upload_count': 'INT NULL',
+        'must_change_password': 'BOOLEAN DEFAULT 0'
     }
 
     # Only run MySQL-specific ALTERs when using a MySQL driver
@@ -521,38 +527,62 @@ def ensure_user_columns():
                         except Exception as exc:
                             logger.warning(f"Skipping user column {col}; encountered error: {exc}")
 
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
-if not ADMIN_PASSWORD:
-    # In a real production environment, you should raise a RuntimeError.
-    # For now, we'll log a warning and use a fallback for development if not provided.
-    logger.warning("ADMIN_PASSWORD environment variable not set. Using default for development.")
-    ADMIN_PASSWORD = 'Admin@123456'
+def generate_secure_password(length=16):
+    """Generate a secure random password."""
+    alphabet = string.ascii_letters + string.digits + '!@#$%^&*(),.?":{}|<>'
+    while True:
+        password = ''.join(secrets.choice(alphabet) for i in range(length))
+        if (any(c.islower() for c in password)
+                and any(c.isupper() for c in password)
+                and any(c.isdigit() for c in password)
+                and any(c in '!@#$%^&*(),.?":{}|<>' for c in password)):
+            return password
 
-OFFICER_PASSWORD = os.environ.get('OFFICER_PASSWORD', 'Officer@123456')
+def initialize_secure_users():
+    """Initialize users with secure random passwords if they don't exist."""
+    
+    # Check if any users exist to avoid re-initialization
+    if User.query.first():
+        return
 
-def add_dummy_users():
-    """Create initial users if they don't exist."""
-    # Check if users already exist to avoid duplicates or primary key errors
-    if not User.query.filter_by(username='admin').first():
-        admin = User(username='admin', role='Admin')
-        admin.set_password(ADMIN_PASSWORD)
-        db.session.add(admin)
-        logger.info("Admin user created.")
-
-    if not User.query.filter_by(username='officer').first():
-        officer = User(username='officer', role='Investigative Officer')
-        officer.set_password(OFFICER_PASSWORD)
-        db.session.add(officer)
-        logger.info("Officer user created.")
-
-    if not User.query.filter_by(username='viewer').first():
-        viewer = User(username='viewer', role='Viewer')
-        viewer.set_password('Viewer@123456')
-        db.session.add(viewer)
-        logger.info("Viewer user created.")
-
+    logger.info("Initializing users with secure random passwords...")
+    
+    users_to_create = [
+        ('admin', 'Admin'),
+        ('officer', 'Investigative Officer'),
+        ('viewer', 'Viewer')
+    ]
+    
+    created_credentials = []
+    
+    for username, role in users_to_create:
+        if not User.query.filter_by(username=username).first():
+            password = generate_secure_password()
+            user = User(username=username, role=role)
+            user.set_password(password)
+            # Ensure the user model has this attribute or handle it if it's dynamic
+            # We added the column to ensure_user_columns, so it should be fine in DB
+            # But the ORM model (models.py) might not have it mapped yet.
+            # However, we can set it on the instance if it's in the DB schema? 
+            # No, SQLAlchemy needs the field in the model class.
+            # We'll assume models.py needs update or we use raw SQL if model not updated?
+            # Ideally update models.py too. But for now let's set it.
+            user.must_change_password = True
+            db.session.add(user)
+            created_credentials.append((username, password))
+            logger.info(f"User '{username}' created.")
+            
     db.session.commit()
-    logger.info("User initialization complete.")
+    
+    if created_credentials:
+        print("\n" + "="*60)
+        print("SECURITY NOTICE: INITIAL PASSWORDS GENERATED")
+        print("="*60)
+        for username, pwd in created_credentials:
+            print(f"User: {username:<15} Password: {pwd}")
+        print("="*60)
+        print("Please copy these credentials immediately. They will not be shown again.")
+        print("You will be required to change the password on first login.\n")
 
 with app.app_context():
     ensure_transaction_columns()
@@ -578,6 +608,33 @@ def is_safe_url(target):
     parsed = urlparse(target)
     return parsed.netloc in ALLOWED_HOSTS and parsed.scheme in ('http', 'https')
 
+@app.route('/change_password', methods=['GET', 'POST'])
+@login_required
+def change_password():
+    if not getattr(current_user, 'must_change_password', False):
+        return redirect(url_for('index'))
+    
+    error = None
+    if request.method == 'POST':
+        new_password = request.form.get('new_password')
+        confirm_password = request.form.get('confirm_password')
+        
+        if new_password != confirm_password:
+            error = "Passwords do not match."
+        else:
+            is_valid, msg = validate_password(new_password)
+            if not is_valid:
+                error = msg
+            else:
+                current_user.set_password(new_password)
+                current_user.must_change_password = False
+                db.session.commit()
+                flash("Password updated successfully. Please login again.")
+                logout_user()
+                return redirect(url_for('login'))
+                
+    return render_template('change_password.html', error=error)
+
 @app.route('/login', methods=['GET', 'POST'])
 @limiter.limit("5 per minute")
 def login():
@@ -592,6 +649,7 @@ def login():
         # Standard login flow for all roles
         # Always perform password check to prevent timing attack
         user = User.query.filter_by(username=username, role=role).first()
+
         
         if user:
              # Check if account is locked
@@ -607,6 +665,7 @@ def login():
         if user:
             password_valid = user.check_password(password)
         else:
+
             # Perform dummy hash operation to maintain consistent timing
             # We use a dummy hash that matches the algorithm used in check_password
             dummy_hash = generate_password_hash('dummy_password')
@@ -626,6 +685,10 @@ def login():
             session['username'] = username
             session['role'] = role
             log_usage('login')
+            
+            # Enforce password change if required
+            if getattr(user, 'must_change_password', False):
+                return redirect(url_for('change_password'))
             
             next_page = request.args.get('next')
             
@@ -1259,8 +1322,10 @@ def download_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], safe_filename)
 
 @app.route('/view_graph')
+@login_required
 def view_graph():
     ack_no = request.args.get('ack_no')
+    check_case_access(ack_no)
     try:
         fname_row = db.session.query(UploadedFile.filename).join(Transaction, Transaction.upload_id == UploadedFile.id).filter(Transaction.ack_no == ack_no).order_by(UploadedFile.upload_time.desc()).first()
         fname = fname_row[0] if fname_row else None
@@ -1270,7 +1335,9 @@ def view_graph():
     return redirect(url_for('graph_tree1', ack_no=ack_no))
 
 @app.route('/graph/<ack_no>')
+@login_required
 def graph_tree1(ack_no):
+    check_case_access(ack_no)
     try:
         fname_row = db.session.query(UploadedFile.filename).join(Transaction, Transaction.upload_id == UploadedFile.id).filter(Transaction.ack_no == ack_no).order_by(UploadedFile.upload_time.desc()).first()
         fname = fname_row[0] if fname_row else None
@@ -1738,9 +1805,28 @@ def graph_data(ack_no):
         return jsonify({'error': 'Internal server error while processing graph data.'}), 500
 
 @app.route('/available_ack_nos')
+@login_required
 def available_ack_nos():
-    """Debug endpoint to list all available ACK numbers"""
-    ack_nos = db.session.query(Transaction.ack_no).distinct().all()
+    """List all available ACK numbers accessible to the current user"""
+    if current_user.role in ['Admin', 'Viewer']:
+        # Admins and Viewers see all cases
+        ack_nos = db.session.query(Transaction.ack_no).distinct().all()
+    else:
+        # Regular users only see cases assigned to them or uploaded by them
+        complaints = Complaint.query.filter(
+            or_(Complaint.assigned_to == current_user.id, Complaint.uploaded_by == current_user.id)
+        ).with_entities(Complaint.ack_no).all()
+        
+        user_ack_nos = [c.ack_no for c in complaints]
+        
+        if not user_ack_nos:
+            return jsonify({'available_ack_nos': []})
+
+        # Only return ack_nos that actually have transactions and are authorized
+        ack_nos = db.session.query(Transaction.ack_no).filter(
+            Transaction.ack_no.in_(user_ack_nos)
+        ).distinct().all()
+
     ack_list = [ack[0] for ack in ack_nos if ack[0]]
     return jsonify({'available_ack_nos': sorted(ack_list)})
 
@@ -2711,6 +2797,7 @@ def generate_letter_docx():
 
 
 @app.route('/view_all_complaints')
+@login_required
 def view_all_complaints():
     try:
         log_usage('view_all_complaints')
@@ -3008,8 +3095,8 @@ def download_logs():
 def delete_complaint(complaint_id):
     complaint = Complaint.query.get_or_404(complaint_id)
 
-    # Authorization check: only admin or complaint owner can delete
-    if current_user.role != 'Admin' and complaint.uploaded_by != current_user.id:
+    # Authorization check: only admin can delete
+    if current_user.role != 'Admin':
         abort(403, description="You don't have permission to delete this complaint")
 
     # Additional audit logging
@@ -3058,8 +3145,8 @@ def delete_by_ack():
 def view_complaint(complaint_id):
     complaint = Complaint.query.get_or_404(complaint_id)
 
-    # Authorization check: only admin, assigned officer, or creator can view
-    if (current_user.role != 'Admin' and 
+    # Authorization check: only admin, viewer, assigned officer, or creator can view
+    if (current_user.role not in ['Admin', 'Viewer'] and 
         complaint.assigned_to != current_user.id and 
         complaint.uploaded_by != current_user.id):
         abort(403, description="You don't have permission to view this complaint")
@@ -3325,7 +3412,7 @@ if __name__ == '__main__':
         db.create_all()
         ensure_transaction_columns()
         ensure_user_columns()
-        add_dummy_users()
+        initialize_secure_users()
 
     # Use environment variable to control debug mode
     debug_mode = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'

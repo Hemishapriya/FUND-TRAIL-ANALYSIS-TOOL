@@ -1,123 +1,164 @@
 
 import unittest
-from app import app, db, User, Complaint, Transaction, UploadedFile, limiter
-import unittest
-import io
+from app import app, db, User, Complaint, Transaction
+from flask_login import login_user
+import json
 
-class TestIDOR(unittest.TestCase):
+class TestIDORRemediation(unittest.TestCase):
     def setUp(self):
+        # Force config change
         app.config['TESTING'] = True
         app.config['WTF_CSRF_ENABLED'] = False
         app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
-        app.config['RATELIMIT_ENABLED'] = False
         
-        self.client = app.test_client()
+        self.app = app.test_client()
+        self.ctx = app.app_context()
+        self.ctx.push()
         
-        with app.app_context():
-            limiter.enabled = False
-            
-            # Force engine disposal to pick up new config
-            db.engine.dispose()
-            
-            # Ensure we are using in-memory DB
-            if 'memory' not in str(db.engine.url):
-                 print(f"WARNING: DB Engine URL is {db.engine.url}. Attempting to use in-memory.")
-            
-            db.drop_all()
-            db.create_all()
-            
-            # Create Users
-            if not User.query.filter_by(username='admin').first():
-                admin = User(username='admin', role='Admin')
-                admin.set_password('AdminPass123!@#')
-                db.session.add(admin)
-            else:
-                admin = User.query.filter_by(username='admin').first()
-            
-            if not User.query.filter_by(username='officer1').first():
-                officer1 = User(username='officer1', role='Investigative Officer')
-                officer1.set_password('OfficerPass123!@#')
-                db.session.add(officer1)
-            else:
-                officer1 = User.query.filter_by(username='officer1').first()
+        # Ensure we are disconnected from any previous DB
+        db.session.remove()
+        db.engine.dispose()
+        
+        # Verify we are using memory DB
+        # Note: db.engine might recreate based on config now
+        if 'memory' not in str(db.engine.url):
+             # Try to force it?
+             pass
+        
+        # Create tables in the (hopefully) new memory DB
+        db.create_all()
 
-            if not User.query.filter_by(username='officer2').first():
-                officer2 = User(username='officer2', role='Investigative Officer')
-                officer2.set_password('OfficerPass123!@#')
-                db.session.add(officer2)
-            else:
-                officer2 = User.query.filter_by(username='officer2').first()
-            
+        # Check if users exist (if we failed to switch DB, this prevents crash but warns)
+        if User.query.filter_by(username='admin_test').first():
+             # We are likely in a dirty DB, let's clean up our test users only
+             User.query.filter_by(username='admin_test').delete()
+             User.query.filter_by(username='officer_test').delete()
+             User.query.filter_by(username='viewer_test').delete()
+             db.session.commit()
+
+        # Create Users with TEST suffixes to avoid prod collision
+        self.admin = User(username='admin_test', role='Admin')
+        self.admin.set_password('AdminPassword123!')
+        
+        self.officer = User(username='officer_test', role='Investigative Officer')
+        self.officer.set_password('OfficerPassword123!')
+        
+        self.viewer = User(username='viewer_test', role='Viewer')
+        self.viewer.set_password('ViewerPassword123!')
+
+        db.session.add_all([self.admin, self.officer, self.viewer])
+        db.session.commit()
+
+        # Clean up existing test complaints and transactions if they persist
+        test_acks = ["ACK-OFFICER-1", "ACK-ADMIN-ONLY"]
+        try:
+            Transaction.query.filter(Transaction.ack_no.in_(test_acks)).delete(synchronize_session=False)
+            Complaint.query.filter(Complaint.ack_no.in_(test_acks)).delete(synchronize_session=False)
             db.session.commit()
-            
-            # Create Case
-            complaint = Complaint(ack_no='ACK1', assigned_to=officer1.id)
-            db.session.add(complaint)
-            
-            # Create UploadedFile (needed for atm_data)
-            up_file = UploadedFile(filename='test.xlsx', uploader='officer1')
-            db.session.add(up_file)
-            db.session.commit()
-            
-            # Create Transactions
-            txn = Transaction(ack_no='ACK1', amount=100, state='Delhi', put_on_hold_txn_id='POH1', upload_id=up_file.id)
-            db.session.add(txn)
-            
-            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"Cleanup warning: {e}")
+
+        # Create Data
+        # Case 1: Assigned to Officer
+        self.case1_ack = "ACK-OFFICER-1"
+        self.complaint1 = Complaint(ack_no=self.case1_ack, assigned_to=self.officer.id)
+        self.txn1 = Transaction(ack_no=self.case1_ack, amount=100.0, layer=1)
+        
+        # Case 2: Unassigned (Admin only)
+        self.case2_ack = "ACK-ADMIN-ONLY"
+        self.complaint2 = Complaint(ack_no=self.case2_ack) # Not assigned
+        self.txn2 = Transaction(ack_no=self.case2_ack, amount=200.0, layer=1)
+
+        db.session.add_all([self.complaint1, self.txn1, self.complaint2, self.txn2])
+        db.session.commit()
 
     def tearDown(self):
-        with app.app_context():
-            db.session.remove()
+        db.session.remove()
+        # Only drop if we are sure it's memory
+        if 'memory' in str(db.engine.url):
             db.drop_all()
+        self.ctx.pop()
 
-    def login(self, username, password, role):
-        return self.client.post('/login', data=dict(
-            username=username,
+    def login(self, username, password):
+        # Map simple names to test names
+        user_map = {
+            'admin': 'admin_test',
+            'officer': 'officer_test',
+            'viewer': 'viewer_test'
+        }
+        real_username = user_map.get(username, username)
+        return self.app.post('/login', data=dict(
+            username=real_username,
             password=password,
-            role=role
+            role=User.query.filter_by(username=real_username).first().role
         ), follow_redirects=True)
 
-    def test_idor_protection(self):
+    def test_unauthenticated_access(self):
+        """Test that unauthenticated users cannot access sensitive endpoints"""
         endpoints = [
-            '/graph_data/ACK1',
-            '/put_on_hold_transactions/ACK1',
-            '/statewise_summary/ACK1',
-            '/state_transactions/ACK1/Delhi',
-            '/atm_data/ACK1'
+            f'/graph_data/{self.case1_ack}',
+            f'/put_on_hold_transactions/{self.case1_ack}',
+            f'/statewise_summary/{self.case1_ack}',
+            f'/state_transactions/{self.case1_ack}/Delhi',
+            f'/atm_data/{self.case1_ack}',
+            '/available_ack_nos'
         ]
         
-        # 1. Unauthenticated
-        print("\n--- Testing Unauthenticated Access ---")
-        for ep in endpoints:
-            resp = self.client.get(ep, follow_redirects=True)
-            # Should redirect to login or be 401
-            if b'Login' in resp.data or b'Please log in' in resp.data:
-                 print(f"PASS: {ep} -> Login Page")
-            elif resp.status_code == 401:
-                 print(f"PASS: {ep} -> 401 Unauthorized")
-            else:
-                 print(f"FAIL: {ep} -> {resp.status_code}")
+        for endpoint in endpoints:
+            response = self.app.get(endpoint)
+            # Should redirect to login (302) or return 401/403 depending on config
+            # Flask-Login usually redirects to login_view
+            self.assertEqual(response.status_code, 302, f"Endpoint {endpoint} accessible without auth!")
+            self.assertIn('/login', response.location, f"Endpoint {endpoint} did not redirect to login")
 
-        # 2. Unauthorized (Officer2)
-        print("\n--- Testing Unauthorized Access (Officer2) ---")
-        self.login('officer2', 'OfficerPass123!@#', 'Investigative Officer')
-        for ep in endpoints:
-            resp = self.client.get(ep)
-            if resp.status_code == 403:
-                print(f"PASS: {ep} -> 403 Forbidden")
-            else:
-                print(f"FAIL: {ep} -> {resp.status_code} (Expected 403)")
+    def test_admin_access(self):
+        """Test that Admin can access everything"""
+        self.login('admin', 'AdminPassword123!')
+        
+        # Access Officer's case
+        resp = self.app.get(f'/graph_data/{self.case1_ack}')
+        self.assertEqual(resp.status_code, 200, "Admin failed to access officer case")
+        
+        # Access Unassigned case
+        resp = self.app.get(f'/graph_data/{self.case2_ack}')
+        self.assertEqual(resp.status_code, 200, "Admin failed to access unassigned case")
 
-        # 3. Authorized (Officer1)
-        print("\n--- Testing Authorized Access (Officer1) ---")
-        self.client.get('/logout', follow_redirects=True)
-        self.login('officer1', 'OfficerPass123!@#', 'Investigative Officer')
-        for ep in endpoints:
-            resp = self.client.get(ep)
-            if resp.status_code == 200:
-                print(f"PASS: {ep} -> 200 OK")
-            else:
-                print(f"INFO: {ep} -> {resp.status_code}")
+        # Check available_ack_nos
+        resp = self.app.get('/available_ack_nos')
+        data = json.loads(resp.data)
+        self.assertIn(self.case1_ack, data['available_ack_nos'])
+        self.assertIn(self.case2_ack, data['available_ack_nos'])
+
+    def test_officer_access(self):
+        """Test IDOR: Officer should only access assigned cases"""
+        self.login('officer', 'OfficerPassword123!')
+        
+        # Access Assigned case -> OK
+        resp = self.app.get(f'/graph_data/{self.case1_ack}')
+        self.assertEqual(resp.status_code, 200, "Officer failed to access assigned case")
+        
+        # Access Unassigned case -> FORBIDDEN (IDOR Protected)
+        resp = self.app.get(f'/graph_data/{self.case2_ack}')
+        self.assertEqual(resp.status_code, 403, "Officer WAS ABLE to access unassigned case (IDOR Vulnerability!)")
+
+        # Check available_ack_nos -> Should only see assigned
+        resp = self.app.get('/available_ack_nos')
+        data = json.loads(resp.data)
+        self.assertIn(self.case1_ack, data['available_ack_nos'])
+        self.assertNotIn(self.case2_ack, data['available_ack_nos'], "Officer saw unassigned case in list")
+
+    def test_viewer_access(self):
+        """Test Viewer can view all but (implicitly) logic handled"""
+        self.login('viewer', 'ViewerPassword123!')
+        
+        # Access Officer's case
+        resp = self.app.get(f'/graph_data/{self.case1_ack}')
+        self.assertEqual(resp.status_code, 200)
+        
+        # Access Unassigned case
+        resp = self.app.get(f'/graph_data/{self.case2_ack}')
+        self.assertEqual(resp.status_code, 200)
 
 if __name__ == '__main__':
     unittest.main()
